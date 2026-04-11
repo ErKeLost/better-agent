@@ -4,10 +4,90 @@ import { client } from "@/better-agent/client";
 import { useAgent } from "@better-agent/client/react";
 import { useState } from "react";
 
+type TextPart = Extract<
+  ReturnType<typeof useAgent<typeof client>>["messages"][number]["parts"][number],
+  { type: "text" }
+>;
+
+type ToolCallPart = Extract<
+  ReturnType<typeof useAgent<typeof client>>["messages"][number]["parts"][number],
+  { type: "tool-call" }
+>;
+
+type ToolResultPart = Extract<
+  ReturnType<typeof useAgent<typeof client>>["messages"][number]["parts"][number],
+  { type: "tool-result" }
+>;
+
+const dedupeByCallId = <T extends { callId: string }>(parts: T[]) =>
+  Array.from(new Map(parts.map((part) => [part.callId, part])).values());
+
+const formatJson = (value: unknown) => {
+  if (typeof value === "string") {
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2);
+    } catch {
+      return value;
+    }
+  }
+
+  if (value === undefined) {
+    return "";
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+};
+
+const getToolTone = (status: "pending" | "success" | "error") =>
+  status === "error"
+    ? "border-red-500/30 bg-red-500/10 text-red-100"
+    : status === "success"
+      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
+      : "border-cyan-500/30 bg-cyan-500/10 text-cyan-100";
+
+const getToolStatusLabel = (part: ToolCallPart) => {
+  if (part.status === "error") return "error";
+  if (part.status === "success") return "success";
+  if (part.state === "input-complete") return "queued";
+  if (part.state === "input-streaming") return "building args";
+  return "running";
+};
+
+const getToolResultSummary = (toolName: string | undefined, result: unknown) => {
+  if (!result || typeof result !== "object") {
+    return "工具执行完成";
+  }
+
+  const payload = result as {
+    weather?: string;
+    location?: string;
+    message?: string;
+    type?: string;
+  };
+
+  if (payload.type === "tool_error") {
+    return payload.message ?? "工具执行失败";
+  }
+
+  if (toolName === "get_weather" && typeof payload.weather === "string") {
+    return payload.weather;
+  }
+
+  if (typeof payload.location === "string") {
+    return `工具已返回 ${payload.location} 的结果`;
+  }
+
+  return "工具执行完成";
+};
+
 export default function Page() {
   const [input, setInput] = useState("");
   const { messages, status, error, sendMessage, stop } = useAgent(client, {
-    agent: "anthropic",
+    agent: "openai",
     conversationId: "main",
     hydrateFromServer: true,
     resume: true,
@@ -45,39 +125,111 @@ export default function Page() {
               </div>
             ) : (
               <div className="grid content-start gap-3 self-start">
-                {messages.map((message) => (
-                  <article
-                    key={message.localId}
-                    className={`max-w-[88%] border px-2.5 py-2 text-sm leading-[1.55] ${
-                      message.role === "user"
-                        ? "ml-auto border-[color:var(--border-strong)] bg-white text-black"
-                        : "border-[color:var(--border)] bg-black text-[color:var(--foreground)]"
-                    }`}
-                  >
-                    <p
-                      className={`m-0 font-mono text-[9px] uppercase tracking-[0.18em] ${
+                {messages.map((message) => {
+                  const textParts = message.parts.filter(
+                    (part): part is TextPart => part.type === "text",
+                  );
+                  const toolCallParts = dedupeByCallId(
+                    message.parts.filter(
+                      (part): part is ToolCallPart => part.type === "tool-call",
+                    ),
+                  );
+                  const toolResultParts = dedupeByCallId(
+                    message.parts.filter(
+                      (part): part is ToolResultPart => part.type === "tool-result",
+                    ),
+                  );
+
+                  return (
+                    <article
+                      key={message.localId}
+                      className={`max-w-[88%] border px-2.5 py-2 text-sm leading-[1.55] ${
                         message.role === "user"
-                          ? "text-black/55"
-                          : "text-[color:var(--muted)]"
+                          ? "ml-auto border-[color:var(--border-strong)] bg-white text-black"
+                          : "border-[color:var(--border)] bg-black text-[color:var(--foreground)]"
                       }`}
                     >
-                      {message.role}
-                    </p>
-                    <p className="m-0 mt-1.5 whitespace-pre-wrap">
-                      {message.parts
-                        .filter(
-                          (
-                            part,
-                          ): part is Extract<
-                            (typeof message.parts)[number],
-                            { type: "text" }
-                          > => part.type === "text",
-                        )
-                        .map((part) => part.text)
-                        .join("\n") || "No text content"}
-                    </p>
-                  </article>
-                ))}
+                      <p
+                        className={`m-0 font-mono text-[9px] uppercase tracking-[0.18em] ${
+                          message.role === "user"
+                            ? "text-black/55"
+                            : "text-[color:var(--muted)]"
+                        }`}
+                      >
+                        {message.role}
+                      </p>
+
+                      {toolCallParts.length > 0 || toolResultParts.length > 0 ? (
+                        <div className="mt-2 grid gap-2">
+                          {toolCallParts.map((part) => (
+                            <section
+                              key={`call-${part.callId}`}
+                              className={`grid gap-2 border px-3 py-2 ${getToolTone(part.status)}`}
+                            >
+                              <div className="flex items-center justify-between gap-3 font-mono text-[10px] uppercase tracking-[0.18em]">
+                                <span>{part.name ?? "tool"}</span>
+                                <span>{getToolStatusLabel(part)}</span>
+                              </div>
+                              <div className="font-mono text-[10px] uppercase tracking-[0.18em] opacity-75">
+                                {part.toolTarget ?? "server"} tool
+                              </div>
+                              {part.args ? (
+                                <pre className="m-0 overflow-x-auto whitespace-pre-wrap break-words border border-white/10 bg-black/30 px-3 py-2 font-mono text-[12px] leading-5 text-white/85">
+                                  {formatJson(part.args)}
+                                </pre>
+                              ) : null}
+                            </section>
+                          ))}
+
+                          {toolResultParts.map((part) => {
+                            const toolCall = toolCallParts.find(
+                              (toolPart) => toolPart.callId === part.callId,
+                            );
+                            const toolName = toolCall?.name;
+
+                            return (
+                              <section
+                                key={`result-${part.callId}`}
+                                className={`grid gap-2 border px-3 py-2 ${getToolTone(part.status)}`}
+                              >
+                                <div className="flex items-center justify-between gap-3 font-mono text-[10px] uppercase tracking-[0.18em]">
+                                  <span>{toolName ? `${toolName} result` : "tool result"}</span>
+                                  <span>{part.status}</span>
+                                </div>
+                                <p className="m-0 text-sm leading-6">
+                                  {getToolResultSummary(toolName, part.result)}
+                                </p>
+                                {part.result ? (
+                                  <pre className="m-0 overflow-x-auto whitespace-pre-wrap break-words border border-white/10 bg-black/30 px-3 py-2 font-mono text-[12px] leading-5 text-white/85">
+                                    {formatJson(part.result)}
+                                  </pre>
+                                ) : null}
+                              </section>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+
+                      {textParts.length > 0 ? (
+                        <div className="mt-2 grid gap-2">
+                          {textParts.map((part, index) => (
+                            <p key={`${message.localId}-text-${index}`} className="m-0 whitespace-pre-wrap">
+                              {part.text}
+                            </p>
+                          ))}
+                        </div>
+                      ) : null}
+
+                      {textParts.length === 0 &&
+                      toolCallParts.length === 0 &&
+                      toolResultParts.length === 0 ? (
+                        <p className="m-0 mt-1.5 whitespace-pre-wrap text-[color:var(--muted)]">
+                          No renderable content
+                        </p>
+                      ) : null}
+                    </article>
+                  );
+                })}
               </div>
             )}
           </section>
